@@ -16,6 +16,7 @@ from decimal import Decimal
 import requests
 import json
 from dotenv import load_dotenv
+import traceback
 
 # Carregar variáveis de ambiente do arquivo .env
 load_dotenv()
@@ -308,22 +309,16 @@ def obter_scorecard(fornecedor_id: int, db: Session = Depends(get_db)):
             (entrega.d5_communication or 0)
         )
     
-    # Score final = SOMA (0-300)
+    # Score final = Qualidade + Comercial + Entrega (0-300)
     score_final = score_qualidade + score_comercial + score_entrega
     
-    # Determinar status com novos thresholds (Braga v2)
-    # Verde: >= 240 (Excelência - >=80%)
-    # Amarelo: 180-239 (Aceitável/Monitoramento - >=60%)
-    # Vermelho: < 180 (Crítico - <60%)
+    # Determinar status baseado em thresholds
     if score_final >= 240:
         status = "verde"
     elif score_final >= 180:
         status = "amarelo"
     else:
         status = "vermelho"
-    
-    # Retornar dados calculados (sem salvar no banco)
-    print(f"[DEBUG] Scorecard calculado para fornecedor {fornecedor_id}: {score_final} ({status})")
     
     return {
         "fornecedor_id": fornecedor_id,
@@ -334,126 +329,54 @@ def obter_scorecard(fornecedor_id: int, db: Session = Depends(get_db)):
         "status": status
     }
 
-@app.get("/dashboard", response_model=DashboardSchema, tags=["Dashboard"])
+@app.get("/dashboard", tags=["Dashboard"])
 def obter_dashboard(db: Session = Depends(get_db)):
     """
-    Obter dados agregados para o dashboard
-    Retorna resumo geral e lista de todos os fornecedores com scorecard
+    Obter dashboard com resumo de todos os fornecedores
     """
     fornecedores = db.query(Fornecedor).all()
     
     if not fornecedores:
         raise HTTPException(status_code=404, detail="Nenhum fornecedor encontrado")
     
-    # Calcular scorecard para cada fornecedor
     fornecedores_com_scorecard = []
-    verde_count = 0
-    amarelo_count = 0
-    vermelho_count = 0
-    scores_totais = []
+    scores = []
     
     for fornecedor in fornecedores:
-        # Obter critérios
-        qualidade = db.query(CriteriosQualidade).filter(
-            CriteriosQualidade.fornecedor_id == fornecedor.id
-        ).order_by(CriteriosQualidade.data_avaliacao.desc()).first()
-        
-        comercial = db.query(CriteriosComercial).filter(
-            CriteriosComercial.fornecedor_id == fornecedor.id
-        ).order_by(CriteriosComercial.data_avaliacao.desc()).first()
-        
-        entrega = db.query(CriteriosEntrega).filter(
-            CriteriosEntrega.fornecedor_id == fornecedor.id
-        ).order_by(CriteriosEntrega.data_avaliacao.desc()).first()
-        
-        # Calcular scores
-        # Qualidade: valor independente (0-150)
-        score_qualidade = qualidade.score_qualidade if qualidade else 0
-        
-        # Comercial: soma de C1-C5 (0-90)
-        score_comercial = 0
-        if comercial:
-            score_comercial = (
-                (comercial.c1_status_contratual or 0) +
-                (comercial.c2_negotiation_target or 0) +
-                (comercial.c3_competitiveness or 0) +
-                (comercial.c4_payment_terms or 0) +
-                (comercial.c5_communication or 0)
-            )
-        
-        # Entrega: soma de D1-D5 (0-60)
-        score_entrega = 0
-        if entrega:
-            score_entrega = (
-                (entrega.d1_adherence_schedule or 0) +
-                (entrega.d2_conformity_seg or 0) +
-                (entrega.d3_special_freights or 0) +
-                (entrega.d4_packaging_labelling or 0) +
-                (entrega.d5_communication or 0)
-            )
-        
-        # Score final = SOMA (0-300)
-        score_final = score_qualidade + score_comercial + score_entrega
-        
-        scores_totais.append(score_final)
-        
-        # Determinar status com novos thresholds (Braga v2)
-        # Verde: >= 240 (Excelência - >=80%)
-        # Amarelo: 180-239 (Aceitável/Monitoramento - >=60%)
-        # Vermelho: < 180 (Crítico - <60%)
-        if score_final >= 240:
-            status = "verde"
-            verde_count += 1
-        elif score_final >= 180:
-            status = "amarelo"
-            amarelo_count += 1
-        else:
-            status = "vermelho"
-            vermelho_count += 1
-        
-        # Adicionar à lista
+        scorecard = obter_scorecard(fornecedor.id, db)
         fornecedores_com_scorecard.append({
-            "fornecedor": {
-                "id": fornecedor.id,
-                "codigo_material": fornecedor.codigo_material,
-                "nome": fornecedor.nome,
-                "pais": fornecedor.pais,
-                "comprador": fornecedor.comprador,
-                "gestor_qualidade": fornecedor.gestor_qualidade
-            },
-            "scorecard": {
-                "fornecedor_id": fornecedor.id,
-                "score_qualidade": score_qualidade,
-                "score_comercial": score_comercial,
-                "score_entrega": score_entrega,
-                "score_final": score_final,
-                "status": status
-            }
+            "fornecedor": fornecedor,
+            "scorecard": scorecard
         })
+        scores.append(scorecard["score_final"])
     
-    # Calcular score médio
-    score_medio = sum(scores_totais) / len(scores_totais) if scores_totais else 0
+    # Contar por status
+    verde = sum(1 for f in fornecedores_com_scorecard if f["scorecard"]["status"] == "verde")
+    amarelo = sum(1 for f in fornecedores_com_scorecard if f["scorecard"]["status"] == "amarelo")
+    vermelho = sum(1 for f in fornecedores_com_scorecard if f["scorecard"]["status"] == "vermelho")
+    
+    score_medio = sum(scores) / len(scores) if scores else 0
     
     return {
         "total_fornecedores": len(fornecedores),
-        "fornecedores_verde": verde_count,
-        "fornecedores_amarelo": amarelo_count,
-        "fornecedores_vermelho": vermelho_count,
+        "fornecedores_verde": verde,
+        "fornecedores_amarelo": amarelo,
+        "fornecedores_vermelho": vermelho,
         "score_medio": score_medio,
         "fornecedores": fornecedores_com_scorecard
     }
 
-@app.post("/scorecard/calcular/{fornecedor_id}", tags=["Scorecard"])
-def recalcular_scorecard(fornecedor_id: int, db: Session = Depends(get_db)):
+@app.get("/dashboard/codigo/{codigo_material}", tags=["Dashboard"])
+def obter_dashboard_por_codigo(codigo_material: str, db: Session = Depends(get_db)):
     """
-    Forçar recálculo do scorecard para um fornecedor
+    Obter scorecard de um fornecedor específico por código de material
+    Combina dados do fornecedor com seu scorecard
     """
-    fornecedor = db.query(Fornecedor).filter(Fornecedor.id == fornecedor_id).first()
-    if not fornecedor:
-        raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
+    fornecedor = obter_fornecedor_por_codigo(codigo_material, db)
+    scorecard = obter_scorecard(fornecedor.id, db)
     
     # Chamar o endpoint de obter_scorecard que já faz o cálculo
-    return obter_scorecard(fornecedor_id, db)
+    return obter_scorecard(fornecedor.id, db)
 
 # =====================================================
 # POWER BI INTEGRATION
@@ -473,7 +396,16 @@ def get_powerbi_token():
     Gerar token de acesso para Power BI Embedded
     """
     try:
+        # Validar configurações
+        if not POWER_BI_CONFIG["client_id"]:
+            raise ValueError("POWERBI_CLIENT_ID nao configurado")
+        if not POWER_BI_CONFIG["client_secret"]:
+            raise ValueError("POWERBI_CLIENT_SECRET nao configurado")
+        if not POWER_BI_CONFIG["tenant_id"]:
+            raise ValueError("POWERBI_TENANT_ID nao configurado")
+        
         token_url = f"https://login.microsoftonline.com/{POWER_BI_CONFIG['tenant_id']}/oauth2/v2.0/token"
+        print(f"[DEBUG] Token URL: {token_url}")
         
         token_data = {
             "grant_type": "client_credentials",
@@ -482,13 +414,22 @@ def get_powerbi_token():
             "scope": "https://analysis.windows.net/.default"
         }
         
-        response = requests.post(token_url, data=token_data)
+        print(f"[DEBUG] Enviando requisicao para Azure AD...")
+        response = requests.post(token_url, data=token_data, timeout=10)
+        print(f"[DEBUG] Status Code: {response.status_code}")
         
         if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Erro ao gerar token Power BI")
+            error_detail = response.text
+            print(f"[DEBUG] Erro da resposta: {error_detail}")
+            raise HTTPException(status_code=500, detail=f"Azure AD retornou erro: {error_detail}")
         
         token_response = response.json()
         
+        if "access_token" not in token_response:
+            print(f"[DEBUG] Resposta sem access_token: {token_response}")
+            raise ValueError("Resposta do Azure AD nao contem access_token")
+        
+        print(f"[DEBUG] Token gerado com sucesso")
         return {
             "access_token": token_response.get("access_token"),
             "token_type": "Bearer",
@@ -496,9 +437,13 @@ def get_powerbi_token():
             "report_id": POWER_BI_CONFIG["report_id"],
             "workspace_id": POWER_BI_CONFIG["workspace_id"]
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Erro ao gerar token Power BI: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Erro ao gerar token: {str(e)}")
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"[ERROR] Erro ao gerar token Power BI: {error_msg}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar token: {error_msg}")
 
 @app.get("/powerbi/config", tags=["Power BI"])
 def get_powerbi_config():
