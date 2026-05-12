@@ -24,6 +24,8 @@ services:
   api:
     build: .
     container_name: tcc_api
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql://usuario:senha123@postgres:5432/tcc_fornecedores
     ports:
