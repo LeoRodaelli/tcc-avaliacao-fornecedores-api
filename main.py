@@ -13,6 +13,12 @@ from datetime import datetime, date
 from typing import List, Optional
 import os
 from decimal import Decimal
+import requests
+import json
+from dotenv import load_dotenv
+
+# Carregar variáveis de ambiente do arquivo .env
+load_dotenv()
 
 # =====================================================
 # CONFIGURAÇÃO DO BANCO DE DADOS
@@ -448,6 +454,62 @@ def recalcular_scorecard(fornecedor_id: int, db: Session = Depends(get_db)):
     
     # Chamar o endpoint de obter_scorecard que já faz o cálculo
     return obter_scorecard(fornecedor_id, db)
+
+# =====================================================
+# POWER BI INTEGRATION
+# =====================================================
+
+POWER_BI_CONFIG = {
+    "client_id": os.getenv("POWERBI_CLIENT_ID", ""),
+    "client_secret": os.getenv("POWERBI_CLIENT_SECRET", ""),
+    "tenant_id": os.getenv("POWERBI_TENANT_ID", ""),
+    "report_id": os.getenv("POWERBI_REPORT_ID", ""),
+    "workspace_id": os.getenv("POWERBI_WORKSPACE_ID", "me")
+}
+
+@app.get("/powerbi/token", tags=["Power BI"])
+def get_powerbi_token():
+    """
+    Gerar token de acesso para Power BI Embedded
+    """
+    try:
+        token_url = f"https://login.microsoftonline.com/{POWER_BI_CONFIG['tenant_id']}/oauth2/v2.0/token"
+        
+        token_data = {
+            "grant_type": "client_credentials",
+            "client_id": POWER_BI_CONFIG["client_id"],
+            "client_secret": POWER_BI_CONFIG["client_secret"],
+            "scope": "https://analysis.windows.net/.default"
+        }
+        
+        response = requests.post(token_url, data=token_data)
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Erro ao gerar token Power BI")
+        
+        token_response = response.json()
+        
+        return {
+            "access_token": token_response.get("access_token"),
+            "token_type": "Bearer",
+            "expires_in": token_response.get("expires_in"),
+            "report_id": POWER_BI_CONFIG["report_id"],
+            "workspace_id": POWER_BI_CONFIG["workspace_id"]
+        }
+    except Exception as e:
+        print(f"Erro ao gerar token Power BI: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar token: {str(e)}")
+
+@app.get("/powerbi/config", tags=["Power BI"])
+def get_powerbi_config():
+    """
+    Retornar configuracoes do Power BI (sem dados sensíveis)
+    """
+    return {
+        "report_id": POWER_BI_CONFIG["report_id"],
+        "workspace_id": POWER_BI_CONFIG["workspace_id"],
+        "embed_url": f"https://app.powerbi.com/reportEmbed?reportId={POWER_BI_CONFIG['report_id']}&groupId={POWER_BI_CONFIG['workspace_id']}"
+    }
 
 @app.get("/health", tags=["Health"])
 def health_check():
